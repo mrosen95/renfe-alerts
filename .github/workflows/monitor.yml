@@ -1,0 +1,64 @@
+name: Renfe monitor
+
+# One long-running job checks every few minutes, then starts its own successor
+# before GitHub's 6-hour job limit. The cron entry only restarts the chain if it
+# ever breaks; GitHub's scheduler is too unreliable to drive the checks itself.
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      test_notify:
+        description: "Do one check and send a test notification"
+        type: boolean
+        default: false
+      dry_run:
+        description: "Do one check without notifying anyone (to verify the setup)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ (inputs.test_notify || inputs.dry_run) && 'renfe-test' || 'renfe-monitor' }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      DATE: "30/10/2026"
+      STOP_AFTER: "2026-10-30T13:25:00+01:00"
+      TIMES: ${{ vars.WATCH_TIMES || '13:25' }}
+      INTERVAL_SEC: ${{ vars.INTERVAL_SEC || '180' }}
+      RUN_MINUTES: "330"
+      PW_CHANNEL: chrome
+      TEST_NOTIFY: ${{ (inputs.test_notify || inputs.dry_run) && 'true' || 'false' }}
+      GMAIL_USER: ${{ secrets.GMAIL_USER }}
+      GMAIL_APP_PASSWORD: ${{ !inputs.dry_run && secrets.GMAIL_APP_PASSWORD || '' }}
+      EMAIL_TO: ${{ inputs.test_notify && secrets.EMAIL_TO_TEST || secrets.EMAIL_TO }}
+      NTFY_TOPIC: ${{ !inputs.dry_run && secrets.NTFY_TOPIC || '' }}
+      TELEGRAM_BOT_TOKEN: ${{ !inputs.dry_run && secrets.TELEGRAM_BOT_TOKEN || '' }}
+      TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: .github/workflows/monitor.yml
+      - name: Install Playwright (uses the runner's preinstalled Chrome)
+        run: pip install -q playwright==1.64.0
+      - name: Monitor
+        run: python monitor_loop.py
+      - name: Start next run
+        if: always() && !inputs.test_notify && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "$(date -u +%s)" -lt "$(date -u -d "$STOP_AFTER" +%s)" ]; then
+            gh workflow run monitor.yml -R "$GITHUB_REPOSITORY"
+          fi
